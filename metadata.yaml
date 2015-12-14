@@ -7,8 +7,8 @@ description: >
 
   This charm manages the HDFS master node (NameNode).
 tags: ["applications", "bigdata", "hadoop", "apache"]
-provides:
-  hdfs:
-    interface: hdfs
-  ganglia:
-    interface: monitor
+requires:
+  datanode:
+    interface: datanode
+  hub:
+    interface: bigdata-hub

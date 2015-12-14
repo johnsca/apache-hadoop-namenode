@@ -19,98 +19,80 @@ def configure_namenode():
 
 
 @when('namenode.started')
-@when_not('hdfs.datanode.connected')
-def status_blocked():
-    hookenv.status_set('blocked', 'Waiting for DataNodes')
-    remove_state('namenode.ready')
+@when_not('datanode.connected')
+def blocked():
+    hookenv.status_set('blocked', 'Waiting for relation to DataNodes')
 
 
-@when('hdfs.client.connected')
-@when_not('namenode.ready')
-def send_blocked(client):
-    client.send_ready(False)
-
-
-@when('hdfs.client.connected')
-@when('namenode.ready')
-def send_ready(client):
-    client.send_ready(True)
-
-
-@when('namenode.started', 'hdfs.client.connected')
-def configure_client(hdfs_rel):
+@when('namenode.started', 'datanode.connected')
+def send_info(datanode):
     hadoop = get_hadoop_base()
     hdfs_port = hadoop.dist_config.port('namenode')
     webhdfs_port = hadoop.dist_config.port('nn_webapp_http')
+    datanode.send_spec(hadoop.spec())
+    datanode.send_ports(hdfs_port, webhdfs_port)
+    datanode.send_ssh_key(utils.get_ssh_key('ubuntu'))
 
-    hdfs_rel.send_spec(hadoop.spec())
-    hdfs_rel.send_ports(hdfs_port, webhdfs_port)
-    hdfs_rel.send_hosts_map(utils.get_kv_hosts())
+
+@when('namenode.started', 'datanode.connected')
+@when_not('datanode.available')
+def waiting(datanode):
+    hookenv.status_set('waiting', 'Waiting for DataNodes')
 
 
-@when('namenode.started', 'hdfs.datanode.connected')
-def configure_datanodes(hdfs_rel):
+@when('namenode.started', 'datanode.available')
+def configure_datanodes(datanode):
     hadoop = get_hadoop_base()
     hdfs = HDFS(hadoop)
-    datanodes = hdfs_rel.datanodes()
-    slaves = [node['hostname'] for node in datanodes]
-    unitdata.kv().set('namenode.slaves', slaves)
+    nodes = datanode.nodes()
 
+    slaves = [node['hostname'] for node in nodes]
+    unitdata.kv().set('namenode.slaves', slaves)
     hdfs.register_slaves(slaves)
-    utils.update_kv_hosts({node['ip']: node['hostname'] for node in datanodes})
+
+    utils.update_kv_hosts({node['ip']: node['hostname'] for node in nodes})
     utils.manage_etc_hosts()
 
-    hdfs_rel.send_hosts_map(utils.get_kv_hosts())
-    hdfs_rel.send_ssh_key(utils.get_ssh_key('ubuntu'))
-
     hookenv.status_set('active', 'Ready ({count} DataNode{s})'.format(
-        count=len(datanodes),
-        s='s' if len(datanodes) > 1 else '',
+        count=len(slaves),
+        s='s' if len(slaves) > 1 else '',
     ))
     set_state('namenode.ready')
 
 
-@when('namenode.started', 'hdfs.datanode.leaving')
-def unregister_datanode(hdfs_rel):
+@when('namenode.started', 'datanode.leaving')
+def unregister_datanode(datanode):
     hadoop = get_hadoop_base()
     hdfs = HDFS(hadoop)
-    nodes_leaving = hdfs_rel.datanodes()  # only returns nodes in "leaving" state
+    nodes_leaving = datanode.nodes()  # only returns nodes in "leaving" state
+
     slaves = unitdata.kv().get('namenode.slaves')
     slaves_leaving = [node['hostname'] for node in nodes_leaving]
     hookenv.log('Slaves leaving: {}'.format(slaves_leaving))
 
     slaves_remaining = list(set(slaves) ^ set(slaves_leaving))
     unitdata.kv().set('namenode.slaves', slaves_remaining)
-
     hdfs.register_slaves(slaves_remaining)
+
     utils.remove_kv_hosts({node['ip']: node['hostname'] for node in nodes_leaving})
     utils.manage_etc_hosts()
 
     if not slaves_remaining:
-        hookenv.status_set('blocked', 'Waiting for DataNodes')
+        hookenv.status_set('blocked', 'Waiting for relation to DataNodes')
         remove_state('namenode.ready')
 
 
-@when('namenode.started', 'hdfs.secondary.connected')
-def configure_secondary(hdfs_rel):
+@when('namenode.ready', 'hub.available')
+def register_hdfs(hub):
     hadoop = get_hadoop_base()
-    hdfs = HDFS(hadoop)
-    secondary = hdfs_rel.secondaries()[0]  # there can be only one
-
-    hdfs.configure_namenode(secondary['hostname'], secondary['port'])
-    utils.update_kv_host(secondary['ip'], secondary['hostname'])
-    utils.manage_etc_hosts()
-
-    hdfs_rel.send_hosts_map(utils.get_kv_hosts())
-    hdfs_rel.send_ssh_key(utils.get_ssh_key('ubuntu'))
+    hub.register_service(name='hdfs', data={
+        'hdfs_port': hadoop.dist_config.port('namenode'),
+        'webhdfs_port': hadoop.dist_config.port('nn_webapp_http'),
+        'hadoop_version': hadoop.dist_config.hadoop_version,
+    })
 
 
-@when('namenode.started', 'hdfs.secondary.leaving')
-def unregister_secondary(hdfs_rel):
-    hadoop = get_hadoop_base()
-    hdfs = HDFS(hadoop)
-    secondary = hdfs_rel.secondaries()[0]  # there can be only one
-
-    hdfs.configure_namenode(secondary['hostname'], secondary['port'])
-    utils.remove_kv_host(secondary['ip'], secondary['hostname'])
-    utils.manage_etc_hosts()
+@when('hub.available')
+@when_not('namenode.ready')
+def unregister_hdfs(hub):
+    hub.unregister_service(name='hdfs')
